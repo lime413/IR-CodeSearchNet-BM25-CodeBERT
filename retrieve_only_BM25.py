@@ -9,6 +9,8 @@ from tqdm import tqdm
 
 from preprocessing import tokenize_for_bm25
 
+import heapq
+
 
 DEFAULT_INDEX_DIR = Path("data/indexes/CodeSearchNet_python_bm25")
 DEFAULT_PROCESSED_DIR = Path("data/processed/CodeSearchNet_python")
@@ -120,7 +122,7 @@ def bm25_score_query(query_text, vocabulary, doc_lengths, avg_doc_len, get_posti
             score = idf * (term_frequency * (k1 + 1)) / denominator
             scores[doc_id] = scores.get(doc_id, 0.0) + score
 
-    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    ranked = heapq.nlargest(top_k, scores.items(), key=lambda item: item[1])
     return ranked[:top_k]
 
 
