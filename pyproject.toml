@@ -1,0 +1,10 @@
+[project]
+name = "ir-codesearchnet-bm25-codebert"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "datasets>=4.8.4",
+    "tqdm>=4.67.3",
+]
