@@ -1,9 +1,13 @@
 import argparse
 import json
+import logging
 import math
 import sqlite3
+import time
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
+import sys
 
 from tqdm import tqdm
 
@@ -15,6 +19,24 @@ import heapq
 DEFAULT_INDEX_DIR = Path("data/indexes/CodeSearchNet_python_bm25")
 DEFAULT_PROCESSED_DIR = Path("data/processed/CodeSearchNet_python")
 DEFAULT_RESULTS_PATH = Path("data/results/bm25_test_metrics.json")
+
+
+def configure_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
+        force=True,
+    )
+    return logging.getLogger("retrieve_only_bm25")
+
+
+def format_elapsed_time(elapsed_seconds):
+    total_seconds = int(round(elapsed_seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def parse_args():
@@ -56,6 +78,12 @@ def parse_args():
         type=int,
         default=2048,
         help="LRU cache size for postings lists.",
+    )
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=10,
+        help="How often to log retrieval progress, in processed queries.",
     )
     return parser.parse_args()
 
@@ -144,7 +172,7 @@ def ndcg_at_k(ranked_doc_ids, relevant_doc_id, k):
     return 0.0
 
 
-def evaluate(index_dir, processed_dir, top_k, max_queries, cache_size):
+def evaluate(index_dir, processed_dir, top_k, max_queries, cache_size, log_interval, logger):
     db_path = index_dir / "bm25_index.sqlite"
     if not db_path.exists():
         raise FileNotFoundError(f"Missing BM25 index: {db_path}")
@@ -158,6 +186,7 @@ def evaluate(index_dir, processed_dir, top_k, max_queries, cache_size):
     doc_lengths = load_document_lengths(connection)
     vocabulary = load_vocabulary(connection)
     get_postings = make_postings_fetcher(connection, cache_size)
+    logger.info("Loaded BM25 index from %s", db_path)
 
     avg_doc_len = index_stats["average_document_length"]
     queries = []
@@ -176,6 +205,12 @@ def evaluate(index_dir, processed_dir, top_k, max_queries, cache_size):
         if max_queries is not None and len(queries) >= max_queries:
             break
 
+    logger.info(
+        "Starting BM25 retrieval for %s queries against %s indexed documents",
+        len(queries),
+        index_stats["document_count"],
+    )
+
     metrics = {
         "query_count": len(queries),
         "MRR@10": 0.0,
@@ -185,7 +220,10 @@ def evaluate(index_dir, processed_dir, top_k, max_queries, cache_size):
     }
     samples = []
 
-    for query in tqdm(queries, desc="Evaluating BM25", unit="query"):
+    for query_index, query in enumerate(
+        tqdm(queries, desc="Evaluating BM25", unit="query"),
+        start=1,
+    ):
         ranked = bm25_score_query(
             query_text=query["query_text"],
             vocabulary=vocabulary,
@@ -215,6 +253,14 @@ def evaluate(index_dir, processed_dir, top_k, max_queries, cache_size):
                 }
             )
 
+        if query_index % log_interval == 0 or query_index == len(queries):
+            logger.info(
+                "Progress: %s/%s queries processed (%.2f%%)",
+                query_index,
+                len(queries),
+                (query_index / len(queries)) * 100 if queries else 100.0,
+            )
+
     query_count = metrics["query_count"] or 1
     metrics["MRR@10"] = round(metrics["MRR@10"] / query_count, 6)
     metrics["Recall@10"] = round(metrics["Recall@10"] / query_count, 6)
@@ -242,25 +288,42 @@ def evaluate(index_dir, processed_dir, top_k, max_queries, cache_size):
 
 def main():
     args = parse_args()
+    logger = configure_logging()
+    started_at = datetime.now().astimezone()
+    started_perf = time.perf_counter()
+    logger.info("Retrieve only BM25 started")
     results = evaluate(
         index_dir=args.index_dir,
         processed_dir=args.processed_dir,
         top_k=args.top_k,
         max_queries=args.max_queries,
         cache_size=args.cache_size,
+        log_interval=args.log_interval,
+        logger=logger,
     )
+    finished_at = datetime.now().astimezone()
+    elapsed_seconds = time.perf_counter() - started_perf
+
+    results["execution"] = {
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "elapsed_seconds": round(elapsed_seconds, 3),
+        "elapsed_hms": format_elapsed_time(elapsed_seconds),
+    }
 
     args.results_path.parent.mkdir(parents=True, exist_ok=True)
     with args.results_path.open("w", encoding="utf-8") as handle:
         json.dump(results, handle, indent=2, ensure_ascii=False)
 
     metrics = results["metrics"]
-    print(f"Results written to: {args.results_path}")
-    print(f"Queries evaluated: {metrics['query_count']}")
-    print(f"MRR@10: {metrics['MRR@10']}")
-    print(f"Recall@10: {metrics['Recall@10']}")
-    print(f"Recall@50: {metrics['Recall@50']}")
-    print(f"nDCG@10: {metrics['nDCG@10']}")
+    logger.info("Results written to: %s", args.results_path)
+    logger.info("Queries evaluated: %s", metrics["query_count"])
+    logger.info("MRR@10: %s", metrics["MRR@10"])
+    logger.info("Recall@10: %s", metrics["Recall@10"])
+    logger.info("Recall@50: %s", metrics["Recall@50"])
+    logger.info("nDCG@10: %s", metrics["nDCG@10"])
+    logger.info("Elapsed time: %s", results["execution"]["elapsed_hms"])
+    logger.info("Retrieve only BM25 done")
 
 
 if __name__ == "__main__":
