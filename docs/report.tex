@@ -1,0 +1,242 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb, amsthm, bm, booktabs}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{url}
+
+\geometry{margin=0.7in}
+
+\usepackage{titlesec}
+\titlespacing*{\section}{0pt}{8pt}{4pt}
+\titlespacing*{\subsection}{0pt}{6pt}{3pt}
+
+\setlength{\abovedisplayskip}{6pt}
+\setlength{\belowdisplayskip}{6pt}
+\setlength{\abovedisplayshortskip}{4pt}
+\setlength{\belowdisplayshortskip}{4pt}
+
+\usepackage{enumitem}
+\setlist{noitemsep, topsep=4pt}
+
+\linespread{0.95}
+
+\title{Code Search over CodeSearchNet with BM25 and CodeBERT Reranking}
+\author{Information Retrieval Course Project}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report describes a search engine for Python code. The system searches
+functions from the Python part of CodeSearchNet using natural language queries.
+We implemented two retrieval pipelines. The first pipeline uses only BM25 and a
+SQLite inverted index. The second pipeline first retrieves BM25 candidates and
+then reranks them with dense CodeBERT embeddings stored in a FAISS index. We also
+implemented a Gradio demo for interactive comparison. In the final evaluation,
+BM25 was stronger than the simple CodeBERT reranker. This result is important
+because it shows that a neural model does not automatically improve retrieval
+quality without fine-tuning or score calibration.
+\end{abstract}
+
+\section{Introduction}
+
+Code search is a common task for developers. A user writes a natural language
+request, for example ``download video by url'' or ``parse json file'', and the
+system must return useful code. This task is different from normal document
+search because code contains function names, identifiers, library calls, and
+short comments. The same meaning can be written with different words, and this
+makes search difficult.
+
+The goal of this project was to build and evaluate a reproducible code search
+pipeline for Python functions. We compare a classical sparse retrieval method,
+BM25, with a two-stage method that uses BM25 plus dense CodeBERT reranking.
+
+\section{Data Loading and Preprocessing}
+
+The dataset is the Python subset of CodeSearchNet \cite{codesearchnet}.
+
+For each record we keep the function name, docstring, code body, split name,
+repository name, file path, and source URL. We build one document text from the
+function name, docstring, and code. This document text is used by CodeBERT. For
+BM25 we also build a lexical representation.
+
+The BM25 tokenizer uses the following preprocessing:
+\begin{itemize}
+    \item extracts words, identifiers, and numbers;
+    \item splits identifiers by underscores;
+    \item splits camelCase identifiers;
+    \item lowercases all tokens;
+    \item removes records with missing function name or missing code.
+\end{itemize}
+
+The processed output contains document files, metadata files, and corpus
+statistics.
+
+The final processed corpus contains 457461 Python functions. Table
+\ref{tab:data} shows the split sizes.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Split & Documents & Average chars & Average lexical tokens \\
+\midrule
+Train & 412178 & 1333.83 & 177.12 \\
+Valid & 23107 & 1430.96 & 191.79 \\
+Test & 22176 & 1355.84 & 180.81 \\
+\bottomrule
+\end{tabular}
+\caption{Processed CodeSearchNet Python corpus.}
+\label{tab:data}
+\end{table}
+
+\section{Indexing and Retrieval Using Only BM25}
+
+BM25 is the lexical baseline. We implemented an inverted index in SQLite. The
+index contains four main tables:
+\begin{itemize}
+    \item \texttt{documents}: document id, split, function name, and document length;
+    \item \texttt{postings}: term, document id, and term frequency;
+    \item \texttt{vocabulary}: document frequency, collection frequency, and inverted document frequency (IDF);
+    \item \texttt{statistics}: global corpus statistics.
+\end{itemize}
+\\
+
+The BM25 formula uses $k_1 = 1.5$ and $b = 0.75$. The IDF is computed as:
+\[
+IDF(t) = \log \left(1 + \frac{N - DF(t) + 0.5}{DF(t) + 0.5}\right),
+\]
+where $N$ is the number of documents and $DF(t)$ is the document frequency of
+term $t$.
+
+For a query, the system tokenizes the query with the same tokenizer, loads
+postings lists from SQLite, computes BM25 scores, and returns the top documents.
+
+The system uses test docstrings as queries. The paired test function is treated
+as the only relevant document. 
+
+\section{Indexing and Retrieval Using BM25 plus CodeBERT Dense Index}
+
+The second pipeline is a two-stage system. It does not replace BM25. It first
+uses BM25 to get a candidate set, and then it reranks this candidate set with
+CodeBERT \cite{codebert}.
+
+The system encodes each document text with \texttt{microsoft/codebert-base}. We
+use mean pooling over token embeddings and then L2-normalize the result. The
+embedding size is 768. The vectors are stored in a FAISS index with inner product
+metric. Because the vectors are normalized, inner product is equal to cosine
+similarity.
+
+Then we evaluate this approach. For each query, BM25 returns 50 candidates.
+Then CodeBERT computes cosine similarity between the query vector and candidate document vectors. The final
+ranking is sorted by dense similarity. If two candidates have the same dense
+score, BM25 score is used as a secondary score.
+
+\section{Evaluation}
+
+We evaluate both methods on the full test split with 22176 queries. The metrics
+are MRR@10, Recall@10, Recall@50, and nDCG@10. Table \ref{tab:metrics} shows the
+final results.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+Method & MRR@10 & Recall@10 & Recall@50 & nDCG@10 \\
+\midrule
+BM25 & 0.939881 & 0.983451 & 0.992109 & 0.950830 \\
+BM25 + CodeBERT rerank & 0.195510 & 0.340458 & 0.992109 & 0.229310 \\
+\bottomrule
+\end{tabular}
+\caption{Retrieval quality on the CodeSearchNet Python test split.}
+\label{tab:metrics}
+\end{table}
+
+The result shows that BM25 is much better in this setup. This can look
+unexpected, because CodeBERT is a neural model for code and natural language.
+However, there are several reasons.
+
+First, the evaluation query is the original docstring of the target function.
+This gives BM25 a strong advantage, because the docstring is also part of the
+indexed document. There is often high lexical overlap between the query and the
+correct document.
+
+Second, the dense method uses a simple pretrained CodeBERT model with mean
+pooling. It is not fine-tuned for this exact retrieval task. It can find
+semantically similar functions, but these functions are not always the paired
+ground-truth function.
+
+Third, the dense stage only reranks the top 50 BM25 candidates. This explains
+why Recall@50 is the same for both methods. The relevant document is in the same
+candidate set, but the dense reranker often moves it lower inside the top 50.
+
+This experiment gives a useful conclusion. A dense model can add semantic
+matching, but it must be trained or combined carefully. For this current project,
+BM25 is the best method by the measured ranking metrics.
+
+\section{Gradio App for Demo}
+
+The project includes a Gradio application.
+
+The app has two tabs. The first tab is \textit{Search}. The user enters a
+natural language query and sees two columns:
+\begin{itemize}
+    \item BM25 lexical results;
+    \item BM25 + CodeBERT reranked results.
+\end{itemize}
+
+Each result shows the rank, function name, repository name, score, source link,
+docstring, and code snippet. The user can change the number of displayed results
+and the number of BM25 candidates for reranking. CodeBERT and FAISS are loaded
+lazily on the first dense query, so the first dense query can be slower.
+
+The second tab is \textit{Evaluation metrics}. It reads the precomputed JSON
+files and shows the metric table, sample rankings, and raw JSON outputs. This
+tab is useful for the screencast because it directly compares the two pipelines.
+
+\section{Limitations and Future Work}
+
+The main limitation is that CodeBERT is used without fine-tuning. Also, the
+current reranker sorts by dense score only, so it can ignore very strong BM25
+evidence. In future work, we would try three improvements:
+\begin{itemize}
+    \item fine-tune CodeBERT or another code retrieval model on CodeSearchNet;
+    \item combine BM25 and dense scores with a weighted formula;
+    \item evaluate on user-written queries, not only original docstrings.
+\end{itemize}
+
+\section{Conclusion}
+
+We implemented a complete code search pipeline with data loading, preprocessing,
+BM25 indexing, dense CodeBERT indexing, evaluation scripts, and a Gradio demo.
+The main experimental result is that BM25 is the strongest method for this
+evaluation setup. BM25 reaches MRR@10 of 0.939881, while BM25 + CodeBERT rerank
+gets 0.195510. The result does not mean that dense retrieval is useless. It means
+that simple pretrained embeddings and pure dense reranking are not enough for
+this task. A better dense system needs fine-tuning or a hybrid score.
+
+\begin{thebibliography}{9}
+
+\bibitem{codesearchnet}
+Husain, H., Wu, H., Gazit, T., Allamanis, M., and Brockschmidt, M.
+CodeSearchNet Challenge: Evaluating the State of Semantic Code Search.
+\textit{arXiv preprint arXiv:1909.09436}, 2019.
+\url{https://arxiv.org/abs/1909.09436}
+
+\bibitem{codebert}
+Feng, Z., Guo, D., Tang, D., Duan, N., Feng, X., Gong, M., Shou, L., Qin, B.,
+Liu, T., Jiang, D., and Zhou, M.
+CodeBERT: A Pre-Trained Model for Programming and Natural Languages.
+\textit{Findings of EMNLP}, 2020.
+\url{https://arxiv.org/abs/2002.08155}
+
+\bibitem{bm25}
+Robertson, S. and Zaragoza, H.
+The Probabilistic Relevance Framework: BM25 and Beyond.
+\textit{Foundations and Trends in Information Retrieval}, 2009.
+
+\end{thebibliography}
+
+\end{document}
