@@ -156,17 +156,28 @@ BM25 + CodeBERT rerank & 0.195510 & 0.340458 & 0.992109 & 0.229310 \\
 
 The result shows that BM25 is much better in this setup. This can look
 unexpected, because CodeBERT is a neural model for code and natural language.
-However, there are several reasons.
+CodeBERT is based on the Transformer architecture and is pretrained on pairs of
+natural language and source code. The pretrained model
+\texttt{microsoft/codebert-base} was trained with CodeSearchNet-style data,
+including documentation-code pairs. However, this does not mean that it will
+automatically improve our reranking results. In our project, CodeBERT is used as
+a zero-shot embedding model. We do not fine-tune it for our exact retrieval
+objective. We only average token embeddings with mean pooling and compare vectors
+with cosine similarity.
+
+There are several reasons why this simple dense reranking gives worse results
+than BM25.
 
 First, the evaluation query is the original docstring of the target function.
 This gives BM25 a strong advantage, because the docstring is also part of the
 indexed document. There is often high lexical overlap between the query and the
 correct document.
 
-Second, the dense method uses a simple pretrained CodeBERT model with mean
-pooling. It is not fine-tuned for this exact retrieval task. It can find
-semantically similar functions, but these functions are not always the paired
-ground-truth function.
+Second, the dense method can find semantically similar functions, but these
+functions are not always the paired ground-truth function. For example, several
+functions can implement the same general task, but the evaluation accepts only
+one paired function as relevant. In this case, CodeBERT may move a similar but
+wrong function above the exact target function, and the metric becomes lower.
 
 Third, the dense stage only reranks the top 50 BM25 candidates. This explains
 why Recall@50 is the same for both methods. The relevant document is in the same
